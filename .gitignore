@@ -1,0 +1,19 @@
+.env
+.venv/
+__pycache__
+.python-version
+*.html
+
+# data directories
+logs/
+state/
+submissions/
+data/
+reports/
+
+# state files
+counters.json
+state.json
+
+# others
+cookie.py

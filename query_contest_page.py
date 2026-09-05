@@ -13,7 +13,9 @@ from dotenv import load_dotenv
 
 from playwright.sync_api import sync_playwright
 
-load_dotenv() 
+from file_utils import make_folder, process_and_write, check_file_exists
+
+load_dotenv()
 
 # Get current date and time
 now = datetime.now()
@@ -24,7 +26,8 @@ file_name_timestamp = now.strftime("%Y-%m-%d_%H-%M-%S")
 logging.basicConfig(level=logging.DEBUG,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                     handlers=[
-                        logging.FileHandler(f"logs/query_pages_{file_name_timestamp}.log"),
+                        logging.FileHandler(
+                            f"logs/query_pages_{file_name_timestamp}.log"),
                         logging.StreamHandler(sys.stdout)
                     ])
 
@@ -111,87 +114,41 @@ def parse_submissions(paged_submissions):
     return parsed_submissions
 
 
+def get_submissions_to_process():
+    with open("data/parsed_submissions.json", "r", encoding="utf-8") as f:
+        return [submission['submission_id'] for submission in json.load(f)]
+
+
 if __name__ == "__main__":
-    # check if file exists
-    logging.info("Checking if data/submissions.json exists...")
-    if not Path("data/submissions.json").exists():
-        logging.info("File not found. Fetching top 100 submissions...")
-        submissions = get_top_100_submissions("weekly-contest-517")
-        logging.info("Saving submissions to data/submissions.json...")
-        with open("data/submissions.json", "w", encoding="utf-8") as f:
-            json.dump(submissions, f)
-    else:
-        logging.info("File found. Skipping fetching submissions.")
+    process_and_write("data/submissions.json",
+                      get_top_100_submissions, os.getenv("LEETCODE_CONTEST_NAME"))
 
-    logging.info("Checking if data/parsed_submissions.json exists...")
-    if not Path("data/parsed_submissions.json").exists():
-        logging.info("File not found. Parsing submissions...")
-        with open("data/submissions.json", "r", encoding="utf-8") as f:
-            parsed_submissions = parse_submissions(json.load(f))
-            logging.info(
-                "Saving parsed submissions to data/parsed_submissions.json...")
-            with open("data/parsed_submissions.json", "w", encoding="utf-8") as f:
-                json.dump(parsed_submissions, f)
-    else:
-        logging.info("File found. Skipping parsing submissions.")
+    process_and_write("data/parsed_submissions.json", parse_submissions,
+                      json.load(open("data/submissions.json", "r", encoding="utf-8")))
 
+    # get valid contest questions in submissions
     valid_questions = set(submission["problem_number"] for submission in json.load(open(
         "data/parsed_submissions.json", "r", encoding="utf-8")))
     logging.info("Valid questions are %s", ",".join(valid_questions))
+    # get the templates for valid_questions
 
     STATE_FOLDER = "state"
-    if not os.path.exists(STATE_FOLDER):
-        os.makedirs(STATE_FOLDER)
-        logging.info("%s created successfully", STATE_FOLDER)
-    else:
-        logging.info("%s already exists", STATE_FOLDER)
-
     SUBMISSIONS_FOLDER = "submissions"
-    if not os.path.exists(SUBMISSIONS_FOLDER):
-        os.makedirs(SUBMISSIONS_FOLDER)
-        logging.info("%s created successfully", SUBMISSIONS_FOLDER)
-    else:
-        logging.info("%s already exists", SUBMISSIONS_FOLDER)
+    make_folder(STATE_FOLDER)
+    make_folder(SUBMISSIONS_FOLDER)
 
     languages = set(submission['lang'] for submission in json.load(
         open("data/parsed_submissions.json", "r", encoding="utf-8")))
     for lang in languages:
         lang_folder = os.path.join(SUBMISSIONS_FOLDER, lang)
-        if not os.path.exists(lang_folder):
-            os.makedirs(lang_folder)
-            logging.info("%s created successfully", lang_folder)
-        else:
-            logging.info("%s already exists", lang_folder)
+        make_folder(lang_folder)
 
+    # Handle state to get processed data.
     logging.info("Generate submissions list to process...")
-    if not Path("state/submissions_to_process.json").exists():
-        with open("data/parsed_submissions.json", "r", encoding="utf-8") as f:
-            submission_ids = [submission['submission_id']
-                              for submission in json.load(f)]
-            with open("state/submissions_to_process.json", "w", encoding="utf-8") as f:
-                json.dump(submission_ids, f)
-    else:
-        logging.info(
-            "File state/submissions_to_process.json already exists. Skipping generation.")
-
-    logging.info("Checking if state/submissions_processed.json exists...")
-    if not Path("state/submissions_processed.json").exists():
-        logging.info(
-            "File not found. Creating state/submissions_processed.json...")
-        with open("state/submissions_processed.json", "w", encoding="utf-8") as f:
-            json.dump([], f)
-    else:
-        logging.info(
-            "File found. Skipping creation of state/submissions_processed.json.")
-    logging.info("Checking if state/invalid_submissions.json exists...")
-    if not Path("state/invalid_submissions.json").exists():
-        logging.info(
-            "File not found. Creating state/invalid_submissions.json...")
-        with open("state/invalid_submissions.json", "w", encoding="utf-8") as f:
-            json.dump([], f)
-    else:
-        logging.info(
-            "File found. Skipping creation of state/invalid_submissions.json.")
+    process_and_write("state/submissions_to_process.json",
+                      get_submissions_to_process)
+    process_and_write("state/submissions_processed.json", lambda: [])
+    process_and_write("state/invalid_submissions.json", lambda: [])
 
     logging.info(
         "Loading submissions to process and already processed submissions...")
@@ -205,7 +162,7 @@ if __name__ == "__main__":
     submissions_processed = []
     invalid_submission_ids = []
     processed_stats = collections.Counter()
-    get_extension = lambda lang: f".{ {'cpp':'cpp', 'c':'c', 'csharp':'cs', 'golang':'go', 'java':'java', 'javascript':'js', 'python':'py', 'python3':'py', 'rust':'rs'}.get(lang.lower(), '') }"
+    get_extension = lambda lang: f".{{'cpp': 'cpp', 'c': 'c', 'csharp': 'cs', 'golang': 'go', 'java': 'java', 'javascript': 'js', 'python': 'py', 'python3': 'py', 'rust': 'rs'}.get(lang.lower(), '') }"
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=False)
@@ -224,7 +181,8 @@ if __name__ == "__main__":
                 lang, code, is_valid = get_submission_details(
                     submission_id, page, valid_questions)
                 if not is_valid:
-                    logging.warning("Submission id %d is invalid", submission_id)
+                    logging.warning(
+                        "Submission id %d is invalid", submission_id)
                     invalid_submission_ids.append(submission_id)
                     processed_stats["invalid_submission_ids"] += 1
                     submissions_processed.append(submission_id)
@@ -243,7 +201,8 @@ if __name__ == "__main__":
                 count += 1
                 if count % BREAK_AT == 0:
                     sleep_time = random.randint(10, 25)
-                    logging.info("Querying hit breakpoint, sleeping for %d", sleep_time)
+                    logging.info(
+                        "Querying hit breakpoint, sleeping for %d", sleep_time)
                     time.sleep(sleep_time)
         except Exception as e:
             logging.error(

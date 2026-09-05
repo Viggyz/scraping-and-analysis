@@ -52,13 +52,15 @@ def get_extension(lang):
         'javascript': 'js',
         'python': 'py',
         'python3': 'py',
-        'rust': 'rs'
+        'rust': 'rs',
+        'kotlin': 'kt',
+        'dart': 'dart',
     }
     return f".{extensions.get(lang.lower(), '')}"
 
 
 def get_dolos_lang(lang): return {'cpp': 'cpp', 'c': 'c', 'csharp': 'cs', 'golang': 'go', 'java': 'java',
-                                  'javascript': 'javascript', 'python': 'python', 'python3': 'python', 'rust': 'rust'}.get(lang.lower(), '')
+                                  'javascript': 'javascript', 'python': 'python', 'python3': 'python', 'rust': 'rust', 'kotlin': 'kotlin', 'dart': 'dart'}.get(lang.lower(), '')
 
 
 def generate_report_for_question(question_id, lang):
@@ -129,8 +131,8 @@ def generate_report_for_question(question_id, lang):
 if __name__ == "__main__":
     valid_questions = set(submission["problem_number"] for submission in json.load(open(
         "data/parsed_submissions.json", "r", encoding="utf-8")))
-    languages = ["cpp", "c", "csharp", "golang", "java",
-                 "javascript", "python", "python3", "rust"]
+    languages = set(submission['lang'] for submission in json.load(
+        open("data/parsed_submissions.json", "r", encoding="utf-8")))
     for question, lang in itertools.product(valid_questions, languages):
         make_folder(f"D:/Intrest/leetcode_query/reports/{question}")
         generate_report_for_question(question, lang)

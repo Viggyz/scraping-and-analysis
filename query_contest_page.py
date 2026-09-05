@@ -54,6 +54,30 @@ def get_top_100_submissions(contest_name: str):
     return users
 
 
+def get_top_n_submissions(contest_name: str, n: int):
+    users = []
+    submissions_per_page = 25
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=False)
+        context = browser.new_context(viewport={"width": 1920, "height": 1080})
+        page = context.new_page()
+        page.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+
+        pages_to_parse = (n + submissions_per_page -
+                          1) // submissions_per_page  # Ceiling division
+        for i in range(1, pages_to_parse + 1):
+            # go to url
+            page.goto(
+                f"https://leetcode.com/contest/{contest_name}/ranking/{i}/?region=global_v2")
+            with page.expect_response(f"https://leetcode.com/contest/api/ranking/{contest_name}/?pagination={i}&region=global_v2") as response_info:
+                # pprint.pp(response_info.value.json())
+                users.append(response_info.value.json())
+                # stuff we care about in this run, possibly get all the user submissions and their submission ids
+                # we can look up the submission code via https://leetcode.com/submissions/detail
+    return users
+
+
 def check_if_in_login(request):
     if request.url.startswith("https://leetcode.com/accounts/login"):
         raise Exception(
@@ -136,8 +160,7 @@ def get_submissions_to_process():
 
 
 if __name__ == "__main__":
-    process_and_write("data/submissions.json",
-                      get_top_100_submissions, os.getenv("LEETCODE_CONTEST_NAME"))
+    process_and_write("data/submissions.json", get_top_n_submissions, os.getenv("LEETCODE_CONTEST_NAME"), int(os.getenv("LEETCODE_CONTEST_SUBMISSIONS")))
 
     process_and_write("data/parsed_submissions.json", parse_submissions,
                       json.load(open("data/submissions.json", "r", encoding="utf-8")))
@@ -225,7 +248,8 @@ if __name__ == "__main__":
                     submissions_processed.append(submission_id)
                     continue
                 # need validation that its returning correct info like question no and user.
-                lang_folder = os.path.join(SUBMISSIONS_FOLDER, lang, submission_id_to_question_id[submission_id])
+                lang_folder = os.path.join(
+                    SUBMISSIONS_FOLDER, lang, submission_id_to_question_id[submission_id])
                 make_folder(lang_folder)
                 with open(f"{lang_folder}/{submission_id}{get_extension(lang)}", "w", encoding="utf-8") as f:
                     f.write(code)

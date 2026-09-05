@@ -1,0 +1,4 @@
+- Maybe separate threads for different operations
+- Like 1 thread for network operations
+- 1 thread for writing to files consistently with passing processed data from network
+- 1 thread for updating counters

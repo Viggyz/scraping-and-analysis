@@ -13,7 +13,8 @@ from dotenv import load_dotenv
 
 from playwright.sync_api import sync_playwright
 
-from file_utils import make_folder, process_and_write, check_file_exists
+from file_utils import make_folder, process_and_write
+from leetcode_api import get_code_template_by_id, get_contest_question_slugs
 
 load_dotenv()
 
@@ -114,6 +115,21 @@ def parse_submissions(paged_submissions):
     return parsed_submissions
 
 
+def get_extension(lang):
+    extensions = {
+        'cpp': 'cpp',
+        'c': 'c',
+        'csharp': 'cs',
+        'golang': 'go',
+        'java': 'java',
+        'javascript': 'js',
+        'python': 'py',
+        'python3': 'py',
+        'rust': 'rs'
+    }
+    return f".{extensions.get(lang.lower(), '')}"
+
+
 def get_submissions_to_process():
     with open("data/parsed_submissions.json", "r", encoding="utf-8") as f:
         return [submission['submission_id'] for submission in json.load(f)]
@@ -126,22 +142,37 @@ if __name__ == "__main__":
     process_and_write("data/parsed_submissions.json", parse_submissions,
                       json.load(open("data/submissions.json", "r", encoding="utf-8")))
 
+    # get content questions
+    contest_questions_slug, contest_questions_ids = get_contest_question_slugs(
+        os.getenv("LEETCODE_CONTEST_NAME"))
     # get valid contest questions in submissions
     valid_questions = set(submission["problem_number"] for submission in json.load(open(
         "data/parsed_submissions.json", "r", encoding="utf-8")))
     logging.info("Valid questions are %s", ",".join(valid_questions))
-    # get the templates for valid_questions
+    print(f"Valid questions are {','.join(valid_questions)}")
+    print(f"Contest questions are {','.join(contest_questions_ids)}")
+    assert set(contest_questions_ids) == valid_questions, "Mismatch between contest questions and valid questions in submissions"
 
     STATE_FOLDER = "state"
     SUBMISSIONS_FOLDER = "submissions"
+    TEMPLATES_FOLDER = "templates"
     make_folder(STATE_FOLDER)
     make_folder(SUBMISSIONS_FOLDER)
+    make_folder(TEMPLATES_FOLDER)
 
     languages = set(submission['lang'] for submission in json.load(
         open("data/parsed_submissions.json", "r", encoding="utf-8")))
     for lang in languages:
         lang_folder = os.path.join(SUBMISSIONS_FOLDER, lang)
         make_folder(lang_folder)
+    for lang in languages:
+        lang_folder = os.path.join(TEMPLATES_FOLDER, lang)
+        make_folder(lang_folder)
+
+    for title_slug, question_id in zip(contest_questions_slug, contest_questions_ids):
+        for lang, code in get_code_template_by_id(title_slug, languages):
+            with open(f"templates/{lang}/{question_id}{get_extension(lang)}", "w", encoding="utf-8") as f:
+                f.write(code)
 
     # Handle state to get processed data.
     logging.info("Generate submissions list to process...")
@@ -158,11 +189,17 @@ if __name__ == "__main__":
         processed_sids = set(json.load(f_processed))
         sids_to_process = list(all_sids - processed_sids)
 
+    # submission_id to question_id map
+    submission_id_to_question_id = {}
+    with open("data/parsed_submissions.json", "r", encoding="utf-8") as f:
+        parsed_submissions = json.load(f)
+        submission_id_to_question_id = {
+            submission['submission_id']: submission['problem_number'] for submission in parsed_submissions}
+
     print(f"Submissions left to process: {len(sids_to_process)}")
     submissions_processed = []
     invalid_submission_ids = []
     processed_stats = collections.Counter()
-    get_extension = lambda lang: f".{{'cpp': 'cpp', 'c': 'c', 'csharp': 'cs', 'golang': 'go', 'java': 'java', 'javascript': 'js', 'python': 'py', 'python3': 'py', 'rust': 'rs'}.get(lang.lower(), '') }"
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=False)
@@ -188,13 +225,9 @@ if __name__ == "__main__":
                     submissions_processed.append(submission_id)
                     continue
                 # need validation that its returning correct info like question no and user.
-                lang_folder = os.path.join(SUBMISSIONS_FOLDER, lang)
-                if not os.path.exists(lang_folder):
-                    os.makedirs(lang_folder)
-                    logging.info("%s created successfully", lang_folder)
-                else:
-                    logging.info("%s already exists", lang_folder)
-                with open(f"submissions/{lang}/{submission_id}{get_extension(lang)}", "w", encoding="utf-8") as f:
+                lang_folder = os.path.join(SUBMISSIONS_FOLDER, lang, submission_id_to_question_id[submission_id])
+                make_folder(lang_folder)
+                with open(f"{lang_folder}/{submission_id}{get_extension(lang)}", "w", encoding="utf-8") as f:
                     f.write(code)
                 # process the submission
                 submissions_processed.append(submission_id)

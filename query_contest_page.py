@@ -1,3 +1,4 @@
+import asyncio
 import collections
 import itertools
 import json
@@ -12,9 +13,13 @@ from datetime import datetime
 from dotenv import load_dotenv
 
 from playwright.sync_api import sync_playwright
+import aiofiles  # Recommended for non-blocking file writes
+from playwright.async_api import async_playwright
+
 
 from file_utils import make_folder, process_and_write
 from leetcode_api import get_code_template_by_id, get_contest_question_slugs
+import async_files_utils
 
 load_dotenv()
 
@@ -101,19 +106,62 @@ def get_submission_details(submission_id: int, page, valid_questions):
         submission = body.get("data", {}).get("submissionDetails", {})
     return submission.get("lang").get("name", ""), submission.get("code", ""), True
 
+async def async_get_submission_details(submission_id: int, page, valid_questions):
+    # expect_response must be converted to async context manager: expect_response(...)
+    async with page.expect_response(
+        lambda response: response.url == "https://leetcode.com/graphql/"
+        and response.request.post_data_json
+        and response.request.post_data_json.get("operationName") == "questionBySubmissionId"
+    ) as response_info_1:
+        
+        # Navigate to submission URL while listening for response
+        await page.goto(f"https://leetcode.com/submissions/detail/{submission_id}/")
+    
+    response_1 = await response_info_1.value
+    body1 = await response_1.json()
+    
+    if not body1:
+        return "", "", False
+        
+    submission1 = body1.get("data", {}).get("submissionDetails", {})
+    if not submission1 or submission1.get("question", {}).get("questionId", -1) not in valid_questions:
+        return "", "", False
 
-def login(page, context):
-    page.add_init_script(
+    # Second GraphQL expectation
+    async with page.expect_response(
+        lambda response: response.url == "https://leetcode.com/graphql/"
+        and response.request.post_data_json
+        and response.request.post_data_json.get("operationName") == "submissionDetails"
+    ) as response_info_2:
+        pass # Wait for response if triggered automatically by page navigation/hydration
+
+    response_2 = await response_info_2.value
+    body2 = await response_2.json()
+    
+    if not body2:
+        return "", "", False
+        
+    submission2 = body2.get("data", {}).get("submissionDetails", {})
+    lang_name = submission2.get("lang", {}).get("name", "")
+    code = submission2.get("code", "")
+    
+    return lang_name, code, True
+
+async def login(page, context):
+    await page.add_init_script(
         "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
     # go to url
-    page.goto(f"https://leetcode.com/accounts/login/")
-    page.locator("#id_login").fill(os.getenv("LEETCODE_USERNAME"))
-    page.locator("#id_password").fill(os.getenv("LEETCODE_PASSWORD"))
-    page.get_by_role("button", name="Sign In").click()
-    # Save storage state into the file.
-    context.storage_state(path="state.json")
-    time.sleep(5)
+    await page.goto(f"https://leetcode.com/accounts/login/")
+    await page.locator("#id_login").fill(os.getenv("LEETCODE_USERNAME"))
+    await page.locator("#id_password").fill(os.getenv("LEETCODE_PASSWORD"))
+    await page.get_by_role("button", name="Sign In").click()
+
+    await page.wait_for_url("https://leetcode.com")
+    # await page.wait_for_load_state("networkidle")
+
+    logging.info("Logged in")
+    # time.sleep(5)
 
 
 def parse_submissions(paged_submissions):
@@ -149,7 +197,9 @@ def get_extension(lang):
         'javascript': 'js',
         'python': 'py',
         'python3': 'py',
-        'rust': 'rs'
+        'rust': 'rs',
+        'kotlin': 'kt',
+        'dart': 'dart',
     }
     return f".{extensions.get(lang.lower(), '')}"
 
@@ -159,8 +209,9 @@ def get_submissions_to_process():
         return [submission['submission_id'] for submission in json.load(f)]
 
 
-if __name__ == "__main__":
-    process_and_write("data/submissions.json", get_top_n_submissions, os.getenv("LEETCODE_CONTEST_NAME"), int(os.getenv("LEETCODE_CONTEST_SUBMISSIONS")))
+async def main():
+    process_and_write("data/submissions.json", get_top_n_submissions, os.getenv(
+        "LEETCODE_CONTEST_NAME"), int(os.getenv("LEETCODE_CONTEST_SUBMISSIONS")))
 
     process_and_write("data/parsed_submissions.json", parse_submissions,
                       json.load(open("data/submissions.json", "r", encoding="utf-8")))
@@ -174,7 +225,8 @@ if __name__ == "__main__":
     logging.info("Valid questions are %s", ",".join(valid_questions))
     print(f"Valid questions are {','.join(valid_questions)}")
     print(f"Contest questions are {','.join(contest_questions_ids)}")
-    assert set(contest_questions_ids) == valid_questions, "Mismatch between contest questions and valid questions in submissions"
+    assert set(
+        contest_questions_ids) == valid_questions, "Mismatch between contest questions and valid questions in submissions"
 
     STATE_FOLDER = "state"
     SUBMISSIONS_FOLDER = "submissions"
@@ -200,7 +252,7 @@ if __name__ == "__main__":
     # Handle state to get processed data.
     logging.info("Generate submissions list to process...")
     process_and_write("state/submissions_to_process.json",
-                      get_submissions_to_process)
+                        get_submissions_to_process)
     process_and_write("state/submissions_processed.json", lambda: [])
     process_and_write("state/invalid_submissions.json", lambda: [])
 
@@ -224,12 +276,12 @@ if __name__ == "__main__":
     invalid_submission_ids = []
     processed_stats = collections.Counter()
 
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=False)
-        context = browser.new_context(
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=False)
+        context = await browser.new_context(
             viewport={"width": 1920, "height": 1080})
-        page = context.new_page()
-        login(page, context)
+        page = await context.new_page()
+        await login(page, context)
         count = 0
         BREAK_AT = 25
         try:
@@ -237,8 +289,9 @@ if __name__ == "__main__":
                 # to_sleep = random.randint(1, 3)
                 # logging.info("Sleeping for %d", to_sleep)
                 # time.sleep(to_sleep)
-                logging.info(f"Processing submission ID: %d", submission_id)
-                lang, code, is_valid = get_submission_details(
+                logging.info(
+                    f"Processing submission ID: %d", submission_id)
+                lang, code, is_valid = await async_get_submission_details(
                     submission_id, page, valid_questions)
                 if not is_valid:
                     logging.warning(
@@ -250,17 +303,17 @@ if __name__ == "__main__":
                 # need validation that its returning correct info like question no and user.
                 lang_folder = os.path.join(
                     SUBMISSIONS_FOLDER, lang, submission_id_to_question_id[submission_id])
-                make_folder(lang_folder)
-                with open(f"{lang_folder}/{submission_id}{get_extension(lang)}", "w", encoding="utf-8") as f:
-                    f.write(code)
+                await async_files_utils.make_folder(lang_folder)
+                async with aiofiles.open(f"{lang_folder}/{submission_id}{get_extension(lang)}", "w", encoding="utf-8") as f:
+                    await f.write(code)
                 # process the submission
                 submissions_processed.append(submission_id)
-                count += 1
-                if count % BREAK_AT == 0:
-                    sleep_time = random.randint(10, 25)
-                    logging.info(
-                        "Querying hit breakpoint, sleeping for %d", sleep_time)
-                    time.sleep(sleep_time)
+                # count += 1
+                # if count % BREAK_AT == 0:
+                #     sleep_time = random.randint(10, 25)
+                #     logging.info(
+                #         "Querying hit breakpoint, sleeping for %d", sleep_time)
+                #     time.sleep(sleep_time)
         except Exception as e:
             logging.error(
                 "Error processing submission ID %d: %s", submission_id, e)
@@ -271,7 +324,7 @@ if __name__ == "__main__":
     logging.info("Processed %d submissions", len(submissions_processed))
 
     logging.info("Updating state with processed submissions: %d",
-                 len(submissions_processed))
+                    len(submissions_processed))
 
     logging.info("Checking if counters.json exists...")
     if not Path("counters.json").exists():
@@ -308,3 +361,7 @@ if __name__ == "__main__":
     logging.info("Updated submissions_processed.json")
 
     logging.info("Done")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

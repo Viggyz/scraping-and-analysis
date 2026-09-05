@@ -106,6 +106,7 @@ def get_submission_details(submission_id: int, page, valid_questions):
         submission = body.get("data", {}).get("submissionDetails", {})
     return submission.get("lang").get("name", ""), submission.get("code", ""), True
 
+
 async def async_get_submission_details(submission_id: int, page, valid_questions):
     # expect_response must be converted to async context manager: expect_response(...)
     async with page.expect_response(
@@ -113,16 +114,17 @@ async def async_get_submission_details(submission_id: int, page, valid_questions
         and response.request.post_data_json
         and response.request.post_data_json.get("operationName") == "questionBySubmissionId"
     ) as response_info_1:
-        
+
         # Navigate to submission URL while listening for response
         await page.goto(f"https://leetcode.com/submissions/detail/{submission_id}/")
-    
+
+
     response_1 = await response_info_1.value
     body1 = await response_1.json()
-    
+
     if not body1:
         return "", "", False
-        
+
     submission1 = body1.get("data", {}).get("submissionDetails", {})
     if not submission1 or submission1.get("question", {}).get("questionId", -1) not in valid_questions:
         return "", "", False
@@ -133,19 +135,20 @@ async def async_get_submission_details(submission_id: int, page, valid_questions
         and response.request.post_data_json
         and response.request.post_data_json.get("operationName") == "submissionDetails"
     ) as response_info_2:
-        pass # Wait for response if triggered automatically by page navigation/hydration
+        pass  # Wait for response if triggered automatically by page navigation/hydration
 
     response_2 = await response_info_2.value
     body2 = await response_2.json()
-    
+
     if not body2:
         return "", "", False
-        
+
     submission2 = body2.get("data", {}).get("submissionDetails", {})
     lang_name = submission2.get("lang", {}).get("name", "")
     code = submission2.get("code", "")
-    
+
     return lang_name, code, True
+
 
 async def login(page, context):
     await page.add_init_script(
@@ -209,6 +212,66 @@ def get_submissions_to_process():
         return [submission['submission_id'] for submission in json.load(f)]
 
 
+async def process_single_submission(
+    submission_id,
+    context,
+    sem,
+    valid_questions,
+    lock,
+    submissions_processed,
+    invalid_submission_ids,
+    processed_stats,
+    submission_id_to_question_id
+):
+    async with sem:
+        page = await context.new_page()
+
+        try:
+            logging.info("Processing submission ID: %d", submission_id)
+
+            lang, code, is_valid = await async_get_submission_details(
+                submission_id, page, valid_questions
+            )
+
+            if not is_valid:
+                logging.warning("Submission id %d is invalid", submission_id)
+
+                # Safely update shared state using the Lock
+                async with lock:
+                    invalid_submission_ids.append(submission_id)
+                    processed_stats["invalid_submission_ids"] += 1
+                    submissions_processed.append(submission_id)
+                return
+
+            # File saving logic
+            lang_folder = os.path.join(
+                'submissions',
+                lang,
+                submission_id_to_question_id[submission_id]
+            )
+            await async_files_utils.make_folder(lang_folder)
+
+            filepath = os.path.join(
+                lang_folder, f"{submission_id}{get_extension(lang)}"
+            )
+            async with aiofiles.open(filepath, "w", encoding="utf-8") as f:
+                await f.write(code)
+
+            # Safely update shared state using the Lock
+            async with lock:
+                submissions_processed.append(submission_id)
+
+        except Exception as e:
+            logging.error("Error processing submission ID %d: %s",
+                          submission_id, e)
+            logging.info("commiting completed submissions")
+
+        finally:
+            # Always close the page when done to free browser RAM
+            await page.close()
+            # Optional: Add a small random delay between requests to mimic human behavior
+            # await asyncio.sleep(random.uniform(0.5, 2.5))
+
 async def main():
     process_and_write("data/submissions.json", get_top_n_submissions, os.getenv(
         "LEETCODE_CONTEST_NAME"), int(os.getenv("LEETCODE_CONTEST_SUBMISSIONS")))
@@ -252,7 +315,7 @@ async def main():
     # Handle state to get processed data.
     logging.info("Generate submissions list to process...")
     process_and_write("state/submissions_to_process.json",
-                        get_submissions_to_process)
+                      get_submissions_to_process)
     process_and_write("state/submissions_processed.json", lambda: [])
     process_and_write("state/invalid_submissions.json", lambda: [])
 
@@ -275,6 +338,7 @@ async def main():
     submissions_processed = []
     invalid_submission_ids = []
     processed_stats = collections.Counter()
+    state_lock = asyncio.Lock()
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=False)
@@ -282,49 +346,37 @@ async def main():
             viewport={"width": 1920, "height": 1080})
         page = await context.new_page()
         await login(page, context)
-        count = 0
-        BREAK_AT = 25
-        try:
-            for submission_id in sids_to_process:
-                # to_sleep = random.randint(1, 3)
-                # logging.info("Sleeping for %d", to_sleep)
-                # time.sleep(to_sleep)
-                logging.info(
-                    f"Processing submission ID: %d", submission_id)
-                lang, code, is_valid = await async_get_submission_details(
-                    submission_id, page, valid_questions)
-                if not is_valid:
-                    logging.warning(
-                        "Submission id %d is invalid", submission_id)
-                    invalid_submission_ids.append(submission_id)
-                    processed_stats["invalid_submission_ids"] += 1
-                    submissions_processed.append(submission_id)
-                    continue
-                # need validation that its returning correct info like question no and user.
-                lang_folder = os.path.join(
-                    SUBMISSIONS_FOLDER, lang, submission_id_to_question_id[submission_id])
-                await async_files_utils.make_folder(lang_folder)
-                async with aiofiles.open(f"{lang_folder}/{submission_id}{get_extension(lang)}", "w", encoding="utf-8") as f:
-                    await f.write(code)
-                # process the submission
-                submissions_processed.append(submission_id)
-                # count += 1
-                # if count % BREAK_AT == 0:
-                #     sleep_time = random.randint(10, 25)
-                #     logging.info(
-                #         "Querying hit breakpoint, sleeping for %d", sleep_time)
-                #     time.sleep(sleep_time)
-        except Exception as e:
-            logging.error(
-                "Error processing submission ID %d: %s", submission_id, e)
-            logging.warning("Sent to login page")
-            logging.info("commiting completed submissions")
+        await page.close()  # close page
+
+        MAX_CONCURRENT_TABS = 5
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT_TABS)
+
+        # Build list of concurrent tasks
+        tasks = [
+            process_single_submission(
+                sid,
+                context,
+                semaphore,
+                valid_questions,
+                state_lock,
+                submissions_processed,
+                invalid_submission_ids,
+                processed_stats,
+                submission_id_to_question_id
+            )
+            for sid in sids_to_process
+        ]
+
+        # Execute all tasks concurrently
+        await asyncio.gather(*tasks[:500])
+
+        await browser.close()
 
     processed_stats["submissions_processed"] += len(submissions_processed)
     logging.info("Processed %d submissions", len(submissions_processed))
 
     logging.info("Updating state with processed submissions: %d",
-                    len(submissions_processed))
+                 len(submissions_processed))
 
     logging.info("Checking if counters.json exists...")
     if not Path("counters.json").exists():
